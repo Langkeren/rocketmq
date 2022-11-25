@@ -538,6 +538,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 log.info("j={}, costTime={}", j, System.currentTimeMillis() - time);
                 time = System.currentTimeMillis();
                 try {
+					// ljx 蛮有意思的代码, 没有20年功力写不出来 @see https://www.cnblogs.com/thisiswhy/p/16657667.html
                     Thread.sleep(0);
                 } catch (InterruptedException e) {
                     log.error("Interrupted", e);
