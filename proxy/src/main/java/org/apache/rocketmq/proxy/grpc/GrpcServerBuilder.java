@@ -35,12 +35,13 @@ import java.nio.file.Paths;
 import java.security.cert.CertificateException;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLException;
 import org.apache.rocketmq.acl.AccessValidator;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.utils.ServiceProvider;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.grpc.interceptor.AuthenticationInterceptor;
@@ -49,7 +50,7 @@ import org.apache.rocketmq.proxy.grpc.interceptor.GlobalExceptionInterceptor;
 import org.apache.rocketmq.proxy.grpc.interceptor.HeaderInterceptor;
 
 public class GrpcServerBuilder {
-    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
     protected NettyServerBuilder serverBuilder;
 
     public static GrpcServerBuilder newBuilder(ThreadPoolExecutor executor, int port) {
@@ -70,20 +71,22 @@ public class GrpcServerBuilder {
         int bossLoopNum = ConfigurationManager.getProxyConfig().getGrpcBossLoopNum();
         int workerLoopNum = ConfigurationManager.getProxyConfig().getGrpcWorkerLoopNum();
         int maxInboundMessageSize = ConfigurationManager.getProxyConfig().getGrpcMaxInboundMessageSize();
+        long idleTimeMills = ConfigurationManager.getProxyConfig().getGrpcClientIdleTimeMills();
 
         if (ConfigurationManager.getProxyConfig().isEnableGrpcEpoll()) {
-            serverBuilder.maxInboundMessageSize(maxInboundMessageSize)
-                .bossEventLoopGroup(new EpollEventLoopGroup(bossLoopNum))
+            serverBuilder.bossEventLoopGroup(new EpollEventLoopGroup(bossLoopNum))
                 .workerEventLoopGroup(new EpollEventLoopGroup(workerLoopNum))
                 .channelType(EpollServerSocketChannel.class)
                 .executor(executor);
         } else {
-            serverBuilder.maxInboundMessageSize(maxInboundMessageSize)
-                .bossEventLoopGroup(new NioEventLoopGroup(bossLoopNum))
+            serverBuilder.bossEventLoopGroup(new NioEventLoopGroup(bossLoopNum))
                 .workerEventLoopGroup(new NioEventLoopGroup(workerLoopNum))
                 .channelType(NioServerSocketChannel.class)
                 .executor(executor);
         }
+
+        serverBuilder.maxInboundMessageSize(maxInboundMessageSize)
+                .maxConnectionIdle(idleTimeMills, TimeUnit.MILLISECONDS);
 
         log.info(
             "grpc server has built. port: {}, tlsKeyPath: {}, tlsCertPath: {}, threadPool: {}, queueCapacity: {}, "
@@ -141,7 +144,7 @@ public class GrpcServerBuilder {
 
     public GrpcServerBuilder configInterceptor() {
         // grpc interceptors, including acl, logging etc.
-        List<AccessValidator> accessValidators = ServiceProvider.load(ServiceProvider.ACL_VALIDATOR_ID, AccessValidator.class);
+        List<AccessValidator> accessValidators = ServiceProvider.load(AccessValidator.class);
         if (!accessValidators.isEmpty()) {
             this.serverBuilder.intercept(new AuthenticationInterceptor(accessValidators));
         }
@@ -153,5 +156,4 @@ public class GrpcServerBuilder {
 
         return this;
     }
-
 }

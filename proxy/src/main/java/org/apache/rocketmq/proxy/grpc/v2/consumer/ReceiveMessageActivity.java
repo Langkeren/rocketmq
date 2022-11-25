@@ -24,15 +24,12 @@ import apache.rocketmq.v2.Settings;
 import apache.rocketmq.v2.Subscription;
 import com.google.protobuf.util.Durations;
 import io.grpc.stub.StreamObserver;
-import java.time.Duration;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.client.consumer.PopStatus;
 import org.apache.rocketmq.common.constant.ConsumeInitMode;
-import org.apache.rocketmq.common.filter.FilterAPI;
 import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageExt;
-import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.proxy.common.MessageReceiptHandle;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
@@ -47,6 +44,8 @@ import org.apache.rocketmq.proxy.processor.ReceiptHandleProcessor;
 import org.apache.rocketmq.proxy.service.route.AddressableMessageQueue;
 import org.apache.rocketmq.proxy.service.route.MessageQueueSelector;
 import org.apache.rocketmq.proxy.service.route.MessageQueueView;
+import org.apache.rocketmq.remoting.protocol.filter.FilterAPI;
+import org.apache.rocketmq.remoting.protocol.heartbeat.SubscriptionData;
 
 public class ReceiveMessageActivity extends AbstractMessingActivity {
     protected ReceiptHandleProcessor receiptHandleProcessor;
@@ -65,16 +64,13 @@ public class ReceiveMessageActivity extends AbstractMessingActivity {
             Settings settings = this.grpcClientSettingsManager.getClientSettings(ctx);
             Subscription subscription = settings.getSubscription();
             boolean fifo = subscription.getFifo();
+            int maxAttempts = settings.getBackoffPolicy().getMaxAttempts();
             ProxyConfig config = ConfigurationManager.getProxyConfig();
 
             Long timeRemaining = ctx.getRemainingMs();
-            if (timeRemaining == null) {
-                timeRemaining = Duration.ofSeconds(20).toMillis();
-            }
-            long pollTime = timeRemaining - config.getLongPollingReserveTimeInMillis();
-            if (pollTime <= 0) {
-                writer.writeAndComplete(ctx, Code.BAD_REQUEST, "time remaining is too small");
-                return;
+            long pollTime = timeRemaining - Durations.toMillis(settings.getRequestTimeout()) / 2;
+            if (pollTime < 0) {
+                pollTime = 0;
             }
             if (pollTime > config.getGrpcClientConsumerLongPollingTimeoutMillis()) {
                 pollTime = config.getGrpcClientConsumerLongPollingTimeoutMillis();
@@ -116,7 +112,7 @@ public class ReceiveMessageActivity extends AbstractMessingActivity {
                 ConsumeInitMode.MAX,
                 subscriptionData,
                 fifo,
-                new PopMessageResultFilterImpl(grpcClientSettingsManager),
+                new PopMessageResultFilterImpl(maxAttempts),
                 timeRemaining
             ).thenAccept(popResult -> {
                 if (proxyConfig.isEnableProxyAutoRenew() && request.getAutoRenew()) {
@@ -127,8 +123,8 @@ public class ReceiveMessageActivity extends AbstractMessingActivity {
                             if (receiptHandle != null) {
                                 MessageReceiptHandle messageReceiptHandle =
                                     new MessageReceiptHandle(group, topic, messageExt.getQueueId(), receiptHandle, messageExt.getMsgId(),
-                                        messageExt.getQueueOffset(), messageExt.getReconsumeTimes(), proxyConfig.getRenewMaxTimeMillis());
-                                receiptHandleProcessor.addReceiptHandle(ctx.getClientID(), group, messageExt.getMsgId(), receiptHandle, messageReceiptHandle);
+                                        messageExt.getQueueOffset(), messageExt.getReconsumeTimes());
+                                receiptHandleProcessor.addReceiptHandle(grpcChannelManager.getChannel(ctx.getClientID()), group, messageExt.getMsgId(), receiptHandle, messageReceiptHandle);
                             }
                         }
                     }

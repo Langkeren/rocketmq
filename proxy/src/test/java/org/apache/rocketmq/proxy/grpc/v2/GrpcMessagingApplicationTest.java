@@ -31,9 +31,10 @@ import io.grpc.stub.StreamObserver;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import org.apache.rocketmq.proxy.common.ProxyContext;
-import org.apache.rocketmq.proxy.config.InitConfigAndLoggerTest;
+import org.apache.rocketmq.proxy.config.InitConfigTest;
 import org.apache.rocketmq.proxy.grpc.interceptor.InterceptorConstants;
 import org.apache.rocketmq.proxy.grpc.v2.common.ResponseBuilder;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,7 +47,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(MockitoJUnitRunner.class)
-public class GrpcMessagingApplicationTest extends InitConfigAndLoggerTest {
+public class GrpcMessagingApplicationTest extends InitConfigTest {
     protected static final String REMOTE_ADDR = "192.168.0.1:8080";
     protected static final String LOCAL_ADDR = "127.0.0.1:8080";
     protected static final String CLIENT_ID = "client-id" + UUID.randomUUID();
@@ -77,9 +78,10 @@ public class GrpcMessagingApplicationTest extends InitConfigAndLoggerTest {
         metadata.put(InterceptorConstants.LANGUAGE, JAVA);
         metadata.put(InterceptorConstants.REMOTE_ADDRESS, REMOTE_ADDR);
         metadata.put(InterceptorConstants.LOCAL_ADDRESS, LOCAL_ADDR);
-        Context.current()
+        
+        Assert.assertNotNull(Context.current()
             .withValue(InterceptorConstants.METADATA, metadata)
-            .attach();
+            .attach());
 
         CompletableFuture<QueryRouteResponse> future = new CompletableFuture<>();
         QueryRouteRequest request = QueryRouteRequest.newBuilder()
@@ -105,9 +107,10 @@ public class GrpcMessagingApplicationTest extends InitConfigAndLoggerTest {
         metadata.put(InterceptorConstants.LANGUAGE, JAVA);
         metadata.put(InterceptorConstants.REMOTE_ADDRESS, REMOTE_ADDR);
         metadata.put(InterceptorConstants.LOCAL_ADDRESS, LOCAL_ADDR);
-        Context.current()
+
+        Assert.assertNotNull(Context.current()
             .withValue(InterceptorConstants.METADATA, metadata)
-            .attach();
+            .attach());
 
         QueryRouteRequest request = QueryRouteRequest.newBuilder()
             .setEndpoints(grpcEndpoints)

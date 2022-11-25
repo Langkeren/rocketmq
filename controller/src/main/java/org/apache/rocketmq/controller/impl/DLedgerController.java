@@ -33,39 +33,43 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 import java.util.function.Supplier;
+import org.apache.rocketmq.common.ControllerConfig;
 import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.common.ControllerConfig;
-import org.apache.rocketmq.common.protocol.ResponseCode;
-import org.apache.rocketmq.common.protocol.body.SyncStateSet;
-import org.apache.rocketmq.common.protocol.header.namesrv.controller.AlterSyncStateSetRequestHeader;
-import org.apache.rocketmq.common.protocol.header.namesrv.controller.RegisterBrokerToControllerRequestHeader;
-import org.apache.rocketmq.common.protocol.header.namesrv.controller.ElectMasterRequestHeader;
-import org.apache.rocketmq.common.protocol.header.namesrv.controller.GetMetaDataResponseHeader;
-import org.apache.rocketmq.common.protocol.header.namesrv.controller.GetReplicaInfoRequestHeader;
 import org.apache.rocketmq.controller.Controller;
+import org.apache.rocketmq.controller.elect.ElectPolicy;
+import org.apache.rocketmq.controller.elect.impl.DefaultElectPolicy;
 import org.apache.rocketmq.controller.impl.event.ControllerResult;
 import org.apache.rocketmq.controller.impl.event.EventMessage;
 import org.apache.rocketmq.controller.impl.event.EventSerializer;
 import org.apache.rocketmq.controller.impl.manager.ReplicasInfoManager;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.ChannelEventListener;
 import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.RemotingServer;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
+import org.apache.rocketmq.remoting.protocol.ResponseCode;
+import org.apache.rocketmq.remoting.protocol.body.SyncStateSet;
+import org.apache.rocketmq.remoting.protocol.header.controller.AlterSyncStateSetRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.controller.CleanControllerBrokerDataRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.controller.ElectMasterRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.controller.GetMetaDataResponseHeader;
+import org.apache.rocketmq.remoting.protocol.header.controller.GetReplicaInfoRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.controller.RegisterBrokerToControllerRequestHeader;
 
 /**
- * The implementation of controller, based on dledger (raft).
+ * The implementation of controller, based on DLedger (raft).
  */
 public class DLedgerController implements Controller {
 
-    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.CONTROLLER_LOGGER_NAME);
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.CONTROLLER_LOGGER_NAME);
     private final DLedgerServer dLedgerServer;
     private final ControllerConfig controllerConfig;
     private final DLedgerConfig dLedgerConfig;
@@ -76,20 +80,24 @@ public class DLedgerController implements Controller {
     private final DLedgerControllerStateMachine statemachine;
     // Usr for checking whether the broker is alive
     private BiPredicate<String, String> brokerAlivePredicate;
-    private volatile boolean isScheduling = false;
+    // use for elect a master
+    private ElectPolicy electPolicy;
+
+    private AtomicBoolean isScheduling = new AtomicBoolean(false);
 
     public DLedgerController(final ControllerConfig config, final BiPredicate<String, String> brokerAlivePredicate) {
-        this(config, brokerAlivePredicate, null, null, null);
+        this(config, brokerAlivePredicate, null, null, null, null);
     }
 
     public DLedgerController(final ControllerConfig controllerConfig,
         final BiPredicate<String, String> brokerAlivePredicate, final NettyServerConfig nettyServerConfig,
-        final NettyClientConfig nettyClientConfig, final ChannelEventListener channelEventListener) {
+        final NettyClientConfig nettyClientConfig, final ChannelEventListener channelEventListener,
+        final ElectPolicy electPolicy) {
         this.controllerConfig = controllerConfig;
         this.eventSerializer = new EventSerializer();
         this.scheduler = new EventScheduler();
         this.brokerAlivePredicate = brokerAlivePredicate;
-
+        this.electPolicy = electPolicy == null ? new DefaultElectPolicy() : electPolicy;
         this.dLedgerConfig = new DLedgerConfig();
         this.dLedgerConfig.setGroup(controllerConfig.getControllerDLegerGroup());
         this.dLedgerConfig.setPeers(controllerConfig.getControllerDLegerPeers());
@@ -104,7 +112,7 @@ public class DLedgerController implements Controller {
         // Register statemachine and role handler.
         this.dLedgerServer = new DLedgerServer(dLedgerConfig, nettyServerConfig, nettyClientConfig, channelEventListener);
         this.dLedgerServer.registerStateMachine(this.statemachine);
-        this.dLedgerServer.getdLedgerLeaderElector().addRoleChangeHandler(this.roleHandler);
+        this.dLedgerServer.getDLedgerLeaderElector().addRoleChangeHandler(this.roleHandler);
     }
 
     @Override
@@ -119,18 +127,16 @@ public class DLedgerController implements Controller {
 
     @Override
     public void startScheduling() {
-        if (!this.isScheduling) {
+        if (this.isScheduling.compareAndSet(false, true)) {
             log.info("Start scheduling controller events");
-            this.isScheduling = true;
             this.scheduler.start();
         }
     }
 
     @Override
     public void stopScheduling() {
-        if (this.isScheduling) {
+        if (this.isScheduling.compareAndSet(true, false)) {
             log.info("Stop scheduling controller events");
-            this.isScheduling = false;
             this.scheduler.shutdown(true);
         }
     }
@@ -154,7 +160,7 @@ public class DLedgerController implements Controller {
     @Override
     public CompletableFuture<RemotingCommand> electMaster(final ElectMasterRequestHeader request) {
         return this.scheduler.appendEvent("electMaster",
-            () -> this.replicasInfoManager.electMaster(request, this.brokerAlivePredicate), true);
+            () -> this.replicasInfoManager.electMaster(request, this.electPolicy), true);
     }
 
     @Override
@@ -171,7 +177,6 @@ public class DLedgerController implements Controller {
 
     @Override
     public CompletableFuture<RemotingCommand> getSyncStateData(List<String> brokerNames) {
-
         return this.scheduler.appendEvent("getSyncStateData",
             () -> this.replicasInfoManager.getSyncStateData(brokerNames), false);
     }
@@ -194,19 +199,26 @@ public class DLedgerController implements Controller {
         return this.dLedgerServer.getRemotingServer();
     }
 
+    @Override
+    public CompletableFuture<RemotingCommand> cleanBrokerData(
+        final CleanControllerBrokerDataRequestHeader requestHeader) {
+        return this.scheduler.appendEvent("cleanBrokerData",
+            () -> this.replicasInfoManager.cleanBrokerData(requestHeader, this.brokerAlivePredicate), true);
+    }
+
     /**
-     * Append the request to dledger, wait the dledger to commit the request.
+     * Append the request to DLedger, and wait for DLedger to commit the request.
      */
-    private boolean appendToDledgerAndWait(final AppendEntryRequest request) throws Throwable {
+    private boolean appendToDLedgerAndWait(final AppendEntryRequest request) throws Throwable {
         if (request != null) {
             request.setGroup(this.dLedgerConfig.getGroup());
             request.setRemoteId(this.dLedgerConfig.getSelfId());
 
-            final AppendFuture<AppendEntryResponse> dledgerFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
-            if (dledgerFuture.getPos() == -1) {
+            final AppendFuture<AppendEntryResponse> dLedgerFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
+            if (dLedgerFuture.getPos() == -1) {
                 return false;
             }
-            dledgerFuture.get(5, TimeUnit.SECONDS);
+            dLedgerFuture.get(5, TimeUnit.SECONDS);
             return true;
         }
         return false;
@@ -219,6 +231,10 @@ public class DLedgerController implements Controller {
 
     public void setBrokerAlivePredicate(BiPredicate<String, String> brokerAlivePredicate) {
         this.brokerAlivePredicate = brokerAlivePredicate;
+    }
+
+    public void setElectPolicy(ElectPolicy electPolicy) {
+        this.electPolicy = electPolicy;
     }
 
     /**
@@ -305,7 +321,7 @@ public class DLedgerController implements Controller {
     }
 
     /**
-     * Event handler, get events from supplier, and append events to dledger
+     * Event handler, get events from supplier, and append events to DLedger
      */
     class ControllerEventHandler<T> implements EventHandler<T> {
         private final String name;
@@ -326,7 +342,18 @@ public class DLedgerController implements Controller {
             final ControllerResult<T> result = this.supplier.get();
             log.info("Event queue run event {}, get the result {}", this.name, result);
             boolean appendSuccess = true;
-            if (this.isWriteEvent) {
+
+            if (!this.isWriteEvent || result.getEvents() == null || result.getEvents().isEmpty()) {
+                // read event, or write event with empty events in response which also equals to read event
+                if (DLedgerController.this.controllerConfig.isProcessReadEvent()) {
+                    // Now the DLedger don't have the function of Read-Index or Lease-Read,
+                    // So we still need to propose an empty request to DLedger.
+                    final AppendEntryRequest request = new AppendEntryRequest();
+                    request.setBody(new byte[0]);
+                    appendSuccess = appendToDLedgerAndWait(request);
+                }
+            } else {
+                // write event
                 final List<EventMessage> events = result.getEvents();
                 final List<byte[]> eventBytes = new ArrayList<>(events.size());
                 for (final EventMessage event : events) {
@@ -337,21 +364,15 @@ public class DLedgerController implements Controller {
                         }
                     }
                 }
-                // Append events to dledger
+                // Append events to DLedger
                 if (!eventBytes.isEmpty()) {
+                    // batch append events
                     final BatchAppendEntryRequest request = new BatchAppendEntryRequest();
                     request.setBatchMsgs(eventBytes);
-                    appendSuccess = appendToDledgerAndWait(request);
-                }
-            } else {
-                if (DLedgerController.this.controllerConfig.isProcessReadEvent()) {
-                    // Now the dledger don't have the function of Read-Index or Lease-Read,
-                    // So we still need to propose an empty request to dledger.
-                    final AppendEntryRequest request = new AppendEntryRequest();
-                    request.setBody(new byte[0]);
-                    appendSuccess = appendToDledgerAndWait(request);
+                    appendSuccess = appendToDLedgerAndWait(request);
                 }
             }
+
             if (appendSuccess) {
                 final RemotingCommand response = RemotingCommand.createResponseCommandWithHeader(result.getResponseCode(), (CommandCustomHeader) result.getResponse());
                 if (result.getBody() != null) {
@@ -362,7 +383,7 @@ public class DLedgerController implements Controller {
                 }
                 this.future.complete(response);
             } else {
-                log.error("Failed to append event to dledger, the response is {}, try cancel the future", result.getResponse());
+                log.error("Failed to append event to DLedger, the response is {}, try cancel the future", result.getResponse());
                 this.future.cancel(true);
             }
         }
@@ -409,24 +430,30 @@ public class DLedgerController implements Controller {
                     case LEADER: {
                         log.info("Controller {} change role to leader, try process a initial proposal", this.selfId);
                         // Because the role becomes to leader, but the memory statemachine of the controller is still in the old point,
-                        // some committed logs have not been applied. Therefore, we must first process an empty request to dledger,
+                        // some committed logs have not been applied. Therefore, we must first process an empty request to DLedger,
                         // and after the request is committed, the controller can provide services(startScheduling).
                         int tryTimes = 0;
                         while (true) {
                             final AppendEntryRequest request = new AppendEntryRequest();
                             request.setBody(new byte[0]);
                             try {
-                                if (appendToDledgerAndWait(request)) {
+                                if (appendToDLedgerAndWait(request)) {
                                     this.currentRole = MemberState.Role.LEADER;
                                     DLedgerController.this.startScheduling();
                                     break;
                                 }
                             } catch (final Throwable e) {
-                                log.error("Error happen when controller leader append initial request to dledger", e);
-                                tryTimes++;
-                                if (tryTimes % 3 == 0) {
-                                    log.warn("Controller leader append initial log failed too many times, please wait a while");
-                                }
+                                log.error("Error happen when controller leader append initial request to DLedger", e);
+                            }
+                            if (!DLedgerController.this.getMemberState().isLeader()) {
+                                // now is not a leader
+                                log.error("Append a initial log failed because current state is not leader");
+                                break;
+                            }
+                            tryTimes++;
+                            log.error(String.format("Controller leader append initial log failed, try %d times", tryTimes));
+                            if (tryTimes % 3 == 0) {
+                                log.warn("Controller leader append initial log failed too many times, please wait a while");
                             }
                         }
                         break;

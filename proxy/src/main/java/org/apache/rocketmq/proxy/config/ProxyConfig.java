@@ -17,6 +17,8 @@
 
 package org.apache.rocketmq.proxy.config;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,17 +27,33 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.common.BrokerConfig;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.proxy.ProxyMode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 
 public class ProxyConfig implements ConfigFile {
     private final static Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
-    public final static String CONFIG_FILE_NAME = "rmq-proxy.json";
+    public final static String DEFAULT_CONFIG_FILE_NAME = "rmq-proxy.json";
     private static final int PROCESSOR_NUMBER = Runtime.getRuntime().availableProcessors();
+    private static final String DEFAULT_CLUSTER_NAME = "DefaultCluster";
+
+    private static String localHostName;
+
+    static {
+        try {
+            localHostName = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            log.error("Failed to obtain the host name", e);
+        }
+    }
 
     private String rocketMQClusterName = "";
+    private String proxyClusterName = DEFAULT_CLUSTER_NAME;
+    private String proxyName = StringUtils.isEmpty(localHostName) ? "DEFAULT_PROXY" : localHostName;
 
     /**
      * configuration for ThreadPoolMonitor
@@ -44,9 +62,9 @@ public class ProxyConfig implements ConfigFile {
     private long printJstackInMillis = Duration.ofSeconds(60).toMillis();
     private long printThreadPoolStatusInMillis = Duration.ofSeconds(3).toMillis();
 
-    private String nameSrvAddr = "";
-    private String nameSrvDomain = "";
-    private String nameSrvDomainSubgroup = "";
+    private String namesrvAddr = System.getProperty(MixAll.NAMESRV_ADDR_PROPERTY, System.getenv(MixAll.NAMESRV_ADDR_ENV));
+    private String namesrvDomain = "";
+    private String namesrvDomainSubgroup = "";
     /**
      * gRPC
      */
@@ -91,6 +109,7 @@ public class ProxyConfig implements ConfigFile {
     private int grpcClientProducerBackoffMultiplier = 2;
     private long grpcClientConsumerLongPollingTimeoutMillis = Duration.ofSeconds(30).toMillis();
     private int grpcClientConsumerLongPollingBatchSize = 32;
+    private long grpcClientIdleTimeMills = Duration.ofSeconds(120).toMillis();
 
     private int channelExpiredInSeconds = 60;
     private int contextExpiredInSeconds = 30;
@@ -139,6 +158,11 @@ public class ProxyConfig implements ConfigFile {
 
     private long invisibleTimeMillisWhenClear = 1000L;
     private boolean enableProxyAutoRenew = true;
+    private int maxRenewRetryTimes = 3;
+    private int renewThreadPoolNums = 2;
+    private int renewMaxThreadPoolNums = 4;
+    private int renewThreadPoolQueueCapacity = 300;
+    private long lockTimeoutMsInHandleGroup = TimeUnit.SECONDS.toMillis(3);
     private long renewAheadTimeMillis = TimeUnit.SECONDS.toMillis(10);
     private long renewSliceTimeMillis = TimeUnit.SECONDS.toMillis(60);
     private long renewMaxTimeMillis = TimeUnit.HOURS.toMillis(3);
@@ -150,9 +174,24 @@ public class ProxyConfig implements ConfigFile {
     private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h";
     private transient Map<Integer /* level */, Long/* delay timeMillis */> delayLevelTable = new ConcurrentHashMap<>();
 
-    private int metricCollectorMode = MetricCollectorMode.OFF.getOrdinal();
+    private String metricCollectorMode = MetricCollectorMode.OFF.getModeString();
     // Example address: 127.0.0.1:1234
     private String metricCollectorAddress = "";
+
+    private BrokerConfig.MetricsExporterType metricsExporterType = BrokerConfig.MetricsExporterType.DISABLE;
+
+    private String metricsGrpcExporterTarget = "";
+    private String metricsGrpcExporterHeader = "";
+    private long metricGrpcExporterTimeOutInMills = 3 * 1000;
+    private long metricGrpcExporterIntervalInMills = 60 * 1000;
+
+    private int metricsPromExporterPort = 5557;
+    private String metricsPromExporterHost = "";
+
+    // Label pairs in CSV. Each label follows pattern of Key:Value. eg: instance_id:xxx,uid:xxx
+    private String metricsLabel = "";
+
+    private boolean metricsInDelta = false;
 
     @Override
     public void initData() {
@@ -204,6 +243,22 @@ public class ProxyConfig implements ConfigFile {
         this.rocketMQClusterName = rocketMQClusterName;
     }
 
+    public String getProxyClusterName() {
+        return proxyClusterName;
+    }
+
+    public void setProxyClusterName(String proxyClusterName) {
+        this.proxyClusterName = proxyClusterName;
+    }
+
+    public String getProxyName() {
+        return proxyName;
+    }
+
+    public void setProxyName(String proxyName) {
+        this.proxyName = proxyName;
+    }
+
     public boolean isEnablePrintJstack() {
         return enablePrintJstack;
     }
@@ -228,28 +283,28 @@ public class ProxyConfig implements ConfigFile {
         this.printThreadPoolStatusInMillis = printThreadPoolStatusInMillis;
     }
 
-    public String getNameSrvAddr() {
-        return nameSrvAddr;
+    public String getNamesrvAddr() {
+        return namesrvAddr;
     }
 
-    public void setNameSrvAddr(String nameSrvAddr) {
-        this.nameSrvAddr = nameSrvAddr;
+    public void setNamesrvAddr(String namesrvAddr) {
+        this.namesrvAddr = namesrvAddr;
     }
 
-    public String getNameSrvDomain() {
-        return nameSrvDomain;
+    public String getNamesrvDomain() {
+        return namesrvDomain;
     }
 
-    public void setNameSrvDomain(String nameSrvDomain) {
-        this.nameSrvDomain = nameSrvDomain;
+    public void setNamesrvDomain(String namesrvDomain) {
+        this.namesrvDomain = namesrvDomain;
     }
 
-    public String getNameSrvDomainSubgroup() {
-        return nameSrvDomainSubgroup;
+    public String getNamesrvDomainSubgroup() {
+        return namesrvDomainSubgroup;
     }
 
-    public void setNameSrvDomainSubgroup(String nameSrvDomainSubgroup) {
-        this.nameSrvDomainSubgroup = nameSrvDomainSubgroup;
+    public void setNamesrvDomainSubgroup(String namesrvDomainSubgroup) {
+        this.namesrvDomainSubgroup = namesrvDomainSubgroup;
     }
 
     public String getProxyMode() {
@@ -788,6 +843,46 @@ public class ProxyConfig implements ConfigFile {
         this.enableProxyAutoRenew = enableProxyAutoRenew;
     }
 
+    public int getMaxRenewRetryTimes() {
+        return maxRenewRetryTimes;
+    }
+
+    public void setMaxRenewRetryTimes(int maxRenewRetryTimes) {
+        this.maxRenewRetryTimes = maxRenewRetryTimes;
+    }
+
+    public int getRenewThreadPoolNums() {
+        return renewThreadPoolNums;
+    }
+
+    public void setRenewThreadPoolNums(int renewThreadPoolNums) {
+        this.renewThreadPoolNums = renewThreadPoolNums;
+    }
+
+    public int getRenewMaxThreadPoolNums() {
+        return renewMaxThreadPoolNums;
+    }
+
+    public void setRenewMaxThreadPoolNums(int renewMaxThreadPoolNums) {
+        this.renewMaxThreadPoolNums = renewMaxThreadPoolNums;
+    }
+
+    public int getRenewThreadPoolQueueCapacity() {
+        return renewThreadPoolQueueCapacity;
+    }
+
+    public void setRenewThreadPoolQueueCapacity(int renewThreadPoolQueueCapacity) {
+        this.renewThreadPoolQueueCapacity = renewThreadPoolQueueCapacity;
+    }
+
+    public long getLockTimeoutMsInHandleGroup() {
+        return lockTimeoutMsInHandleGroup;
+    }
+
+    public void setLockTimeoutMsInHandleGroup(long lockTimeoutMsInHandleGroup) {
+        this.lockTimeoutMsInHandleGroup = lockTimeoutMsInHandleGroup;
+    }
+
     public long getRenewAheadTimeMillis() {
         return renewAheadTimeMillis;
     }
@@ -820,11 +915,11 @@ public class ProxyConfig implements ConfigFile {
         this.renewSchedulePeriodMillis = renewSchedulePeriodMillis;
     }
 
-    public int getMetricCollectorMode() {
+    public String getMetricCollectorMode() {
         return metricCollectorMode;
     }
 
-    public void setMetricCollectorMode(int metricCollectorMode) {
+    public void setMetricCollectorMode(String metricCollectorMode) {
         this.metricCollectorMode = metricCollectorMode;
     }
 
@@ -854,5 +949,93 @@ public class ProxyConfig implements ConfigFile {
 
     public Map<Integer, Long> getDelayLevelTable() {
         return delayLevelTable;
+    }
+
+    public long getGrpcClientIdleTimeMills() {
+        return grpcClientIdleTimeMills;
+    }
+
+    public void setGrpcClientIdleTimeMills(final long grpcClientIdleTimeMills) {
+        this.grpcClientIdleTimeMills = grpcClientIdleTimeMills;
+    }
+
+    public BrokerConfig.MetricsExporterType getMetricsExporterType() {
+        return metricsExporterType;
+    }
+
+    public void setMetricsExporterType(BrokerConfig.MetricsExporterType metricsExporterType) {
+        this.metricsExporterType = metricsExporterType;
+    }
+
+    public void setMetricsExporterType(int metricsExporterType) {
+        this.metricsExporterType = BrokerConfig.MetricsExporterType.valueOf(metricsExporterType);
+    }
+
+    public void setMetricsExporterType(String metricsExporterType) {
+        this.metricsExporterType = BrokerConfig.MetricsExporterType.valueOf(metricsExporterType);
+    }
+
+    public String getMetricsGrpcExporterTarget() {
+        return metricsGrpcExporterTarget;
+    }
+
+    public void setMetricsGrpcExporterTarget(String metricsGrpcExporterTarget) {
+        this.metricsGrpcExporterTarget = metricsGrpcExporterTarget;
+    }
+
+    public String getMetricsGrpcExporterHeader() {
+        return metricsGrpcExporterHeader;
+    }
+
+    public void setMetricsGrpcExporterHeader(String metricsGrpcExporterHeader) {
+        this.metricsGrpcExporterHeader = metricsGrpcExporterHeader;
+    }
+
+    public long getMetricGrpcExporterTimeOutInMills() {
+        return metricGrpcExporterTimeOutInMills;
+    }
+
+    public void setMetricGrpcExporterTimeOutInMills(long metricGrpcExporterTimeOutInMills) {
+        this.metricGrpcExporterTimeOutInMills = metricGrpcExporterTimeOutInMills;
+    }
+
+    public long getMetricGrpcExporterIntervalInMills() {
+        return metricGrpcExporterIntervalInMills;
+    }
+
+    public void setMetricGrpcExporterIntervalInMills(long metricGrpcExporterIntervalInMills) {
+        this.metricGrpcExporterIntervalInMills = metricGrpcExporterIntervalInMills;
+    }
+
+    public int getMetricsPromExporterPort() {
+        return metricsPromExporterPort;
+    }
+
+    public void setMetricsPromExporterPort(int metricsPromExporterPort) {
+        this.metricsPromExporterPort = metricsPromExporterPort;
+    }
+
+    public String getMetricsPromExporterHost() {
+        return metricsPromExporterHost;
+    }
+
+    public void setMetricsPromExporterHost(String metricsPromExporterHost) {
+        this.metricsPromExporterHost = metricsPromExporterHost;
+    }
+
+    public String getMetricsLabel() {
+        return metricsLabel;
+    }
+
+    public void setMetricsLabel(String metricsLabel) {
+        this.metricsLabel = metricsLabel;
+    }
+
+    public boolean isMetricsInDelta() {
+        return metricsInDelta;
+    }
+
+    public void setMetricsInDelta(boolean metricsInDelta) {
+        this.metricsInDelta = metricsInDelta;
     }
 }

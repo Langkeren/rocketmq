@@ -18,7 +18,7 @@ package org.apache.rocketmq.controller.impl.event;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.rocketmq.common.protocol.ResponseCode;
+import org.apache.rocketmq.remoting.protocol.ResponseCode;
 
 public class ControllerResult<T> {
     private final List<EventMessage> events;
@@ -78,7 +78,8 @@ public class ControllerResult<T> {
         this.events.add(event);
     }
 
-    @Override public String toString() {
+    @Override
+    public String toString() {
         return "ControllerResult{" +
             "events=" + events +
             ", response=" + response +

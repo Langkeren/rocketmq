@@ -47,6 +47,21 @@ public class MessageStoreConfig {
     // CommitLog file size,default is 1G
     private int mappedFileSizeCommitLog = 1024 * 1024 * 1024;
 
+    // CompactinLog file size, default is 100M
+    private int compactionMappedFileSize = 100 * 1024 * 1024;
+
+    // CompactionLog consumeQueue file size, default is 10M
+    private int compactionCqMappedFileSize = 10 * 1024 * 1024;
+
+    private int compactionScheduleInternal = 15 * 60 * 1000;
+
+    private int maxOffsetMapSize = 100 * 1024 * 1024;
+
+    private int compactionThreadNum = 0;
+
+    private boolean enableCompaction = true;
+
+
     // TimerLog file size, default is 100M
     private int mappedFileSizeTimerLog = 100 * 1024 * 1024;
 
@@ -62,7 +77,7 @@ public class MessageStoreConfig {
     private boolean timerEnableCheckMetrics = true;
     private boolean timerInterceptDelayLevel = false;
     private int timerMaxDelaySec = 3600 * 24 * 3;
-    private static boolean timerWheelEnable = true;
+    private boolean timerWheelEnable = true;
 
     /**
      * 1. Register to broker after (startTime + disappearTimeAfterStart)
@@ -187,7 +202,7 @@ public class MessageStoreConfig {
     private String haMasterAddress = null;
     private int haMaxGapNotInSync = 1024 * 1024 * 256;
     @ImportantField
-    private BrokerRole brokerRole = BrokerRole.ASYNC_MASTER;
+    private volatile BrokerRole brokerRole = BrokerRole.ASYNC_MASTER;
     @ImportantField
     private FlushDiskType flushDiskType = FlushDiskType.ASYNC_FLUSH;
     // Used by GroupTransferService to sync messages from master to slave
@@ -238,8 +253,10 @@ public class MessageStoreConfig {
     //For recheck the reput
     private boolean recheckReputOffsetFromCq = false;
 
-    // Maximum length of topic
-    private int maxTopicLength = 1000;
+    // Maximum length of topic, it will be removed in the future release
+    @Deprecated
+    private int maxTopicLength = Byte.MAX_VALUE;
+
     private int travelCqFileNumWhenGetMessage = 1;
     // Sleep interval between to corrections
     private int correctLogicMinOffsetSleepInterval = 1;
@@ -383,6 +400,54 @@ public class MessageStoreConfig {
         this.warmMapedFileEnable = warmMapedFileEnable;
     }
 
+    public int getCompactionMappedFileSize() {
+        return compactionMappedFileSize;
+    }
+
+    public int getCompactionCqMappedFileSize() {
+        return compactionCqMappedFileSize;
+    }
+
+    public void setCompactionMappedFileSize(int compactionMappedFileSize) {
+        this.compactionMappedFileSize = compactionMappedFileSize;
+    }
+
+    public void setCompactionCqMappedFileSize(int compactionCqMappedFileSize) {
+        this.compactionCqMappedFileSize = compactionCqMappedFileSize;
+    }
+
+    public int getCompactionScheduleInternal() {
+        return compactionScheduleInternal;
+    }
+
+    public void setCompactionScheduleInternal(int compactionScheduleInternal) {
+        this.compactionScheduleInternal = compactionScheduleInternal;
+    }
+
+    public int getMaxOffsetMapSize() {
+        return maxOffsetMapSize;
+    }
+
+    public void setMaxOffsetMapSize(int maxOffsetMapSize) {
+        this.maxOffsetMapSize = maxOffsetMapSize;
+    }
+
+    public int getCompactionThreadNum() {
+        return compactionThreadNum;
+    }
+
+    public void setCompactionThreadNum(int compactionThreadNum) {
+        this.compactionThreadNum = compactionThreadNum;
+    }
+
+    public boolean isEnableCompaction() {
+        return enableCompaction;
+    }
+
+    public void setEnableCompaction(boolean enableCompaction) {
+        this.enableCompaction = enableCompaction;
+    }
+
     public int getMappedFileSizeCommitLog() {
         return mappedFileSizeCommitLog;
     }
@@ -465,10 +530,12 @@ public class MessageStoreConfig {
         this.maxMessageSize = maxMessageSize;
     }
 
+    @Deprecated
     public int getMaxTopicLength() {
         return maxTopicLength;
     }
 
+    @Deprecated
     public void setMaxTopicLength(int maxTopicLength) {
         this.maxTopicLength = maxTopicLength;
     }
@@ -707,6 +774,10 @@ public class MessageStoreConfig {
     }
 
     public void setHaListenPort(int haListenPort) {
+        if (haListenPort < 0) {
+            this.haListenPort = 0;
+            return;
+        }
         this.haListenPort = haListenPort;
     }
 
@@ -871,9 +942,7 @@ public class MessageStoreConfig {
     }
 
     /**
-     * Enable transient commitLog store pool only if transientStorePoolEnable is true and the FlushDiskType is
-     * ASYNC_FLUSH
-     *
+     * Enable transient commitLog store pool only if transientStorePoolEnable is true and broker role is not SLAVE
      * @return <tt>true</tt> or <tt>false</tt>
      */
     public boolean isTransientStorePoolEnable() {
@@ -1437,7 +1506,7 @@ public class MessageStoreConfig {
         return timerWarmEnable;
     }
 
-    public static boolean isTimerWheelEnable() {
+    public  boolean isTimerWheelEnable() {
         return timerWheelEnable;
     }
     public void setTimerWheelEnable(boolean timerWheelEnable) {

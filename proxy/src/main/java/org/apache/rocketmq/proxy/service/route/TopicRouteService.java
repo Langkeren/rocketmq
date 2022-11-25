@@ -16,8 +16,9 @@
  */
 package org.apache.rocketmq.proxy.service.route;
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -28,26 +29,30 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageQueue;
-import org.apache.rocketmq.common.protocol.ResponseCode;
-import org.apache.rocketmq.common.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.thread.ThreadPoolMonitor;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.common.AbstractCacheLoader;
 import org.apache.rocketmq.proxy.common.AbstractStartAndShutdown;
 import org.apache.rocketmq.proxy.common.Address;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.service.mqclient.MQClientAPIFactory;
+import org.apache.rocketmq.remoting.protocol.ResponseCode;
+import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
+import org.checkerframework.checker.nullness.qual.NonNull;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 public abstract class TopicRouteService extends AbstractStartAndShutdown {
-    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
 
     private final MQClientAPIFactory mqClientAPIFactory;
 
     protected final LoadingCache<String /* topicName */, MessageQueueView> topicCache;
     protected final ScheduledExecutorService scheduledExecutorService;
     protected final ThreadPoolExecutor cacheRefreshExecutor;
+    private final TopicRouteCacheLoader topicRouteCacheLoader = new TopicRouteCacheLoader();
+
 
     public TopicRouteService(MQClientAPIFactory mqClientAPIFactory) {
         ProxyConfig config = ConfigurationManager.getProxyConfig();
@@ -64,10 +69,37 @@ public abstract class TopicRouteService extends AbstractStartAndShutdown {
             config.getTopicRouteServiceThreadPoolQueueCapacity()
         );
         this.mqClientAPIFactory = mqClientAPIFactory;
-        this.topicCache = CacheBuilder.newBuilder()
-            .maximumSize(config.getTopicRouteServiceCacheMaxNum())
-            .refreshAfterWrite(config.getTopicRouteServiceCacheExpiredInSeconds(), TimeUnit.SECONDS)
-            .build(new TopicRouteCacheLoader());
+
+        this.topicCache = Caffeine.newBuilder().maximumSize(config.getTopicRouteServiceCacheMaxNum()).
+            refreshAfterWrite(config.getTopicRouteServiceCacheExpiredInSeconds(), TimeUnit.SECONDS).
+            executor(cacheRefreshExecutor).build(new CacheLoader<String, MessageQueueView>() {
+                @Override public @Nullable MessageQueueView load(String topic) throws Exception {
+                    try {
+                        TopicRouteData topicRouteData = topicRouteCacheLoader.loadTopicRouteData(topic);
+                        if (isTopicRouteValid(topicRouteData)) {
+                            MessageQueueView tmp = new MessageQueueView(topic, topicRouteData);
+                            log.info("load topic route from namesrv. topic: {}, queue: {}", topic, tmp);
+                            return tmp;
+                        }
+                        return MessageQueueView.WRAPPED_EMPTY_QUEUE;
+                    } catch (Exception e) {
+                        if (TopicRouteHelper.isTopicNotExistError(e)) {
+                            return MessageQueueView.WRAPPED_EMPTY_QUEUE;
+                        }
+                        throw e;
+                    }
+                }
+
+                @Override public @Nullable MessageQueueView reload(@NonNull String key,
+                    @NonNull MessageQueueView oldValue) throws Exception {
+                    try {
+                        return load(key);
+                    } catch (Exception e) {
+                        log.warn(String.format("reload topic route from namesrv. topic: %s", key), e);
+                        return oldValue;
+                    }
+                }
+            });
 
         this.init();
     }

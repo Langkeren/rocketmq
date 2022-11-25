@@ -23,16 +23,18 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.rocketmq.common.EpochEntry;
 import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
-import org.apache.rocketmq.remoting.common.RemotingUtil;
+import org.apache.rocketmq.common.utils.NetworkUtil;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
+import org.apache.rocketmq.remoting.common.RemotingHelper;
+import org.apache.rocketmq.remoting.protocol.EpochEntry;
 import org.apache.rocketmq.store.DefaultMessageStore;
 import org.apache.rocketmq.store.ha.FlowMonitor;
 import org.apache.rocketmq.store.ha.HAClient;
@@ -58,7 +60,7 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
      */
     public static final int TRANSFER_HEADER_SIZE = 4 + 8;
     public static final int MIN_HEADER_SIZE = Math.min(HANDSHAKE_HEADER_SIZE, TRANSFER_HEADER_SIZE);
-    private static final InternalLogger LOGGER = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
+    private static final Logger LOGGER = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
     private static final int READ_MAX_BUFFER_SIZE = 1024 * 1024 * 4;
     private final AtomicReference<String> masterHaAddress = new AtomicReference<>();
     private final AtomicReference<String> masterAddress = new AtomicReference<>();
@@ -91,7 +93,7 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
     /**
      * Current epoch
      */
-    private volatile long currentReceivedEpoch;
+    private volatile int currentReceivedEpoch;
 
     public AutoSwitchHAClient(AutoSwitchHAService haService, DefaultMessageStore defaultMessageStore,
         EpochFileCache epochCache) throws IOException {
@@ -102,7 +104,7 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
     }
 
     public void init() throws IOException {
-        this.selector = RemotingUtil.openSelector();
+        this.selector = NetworkUtil.openSelector();
         this.flowMonitor = new FlowMonitor(this.messageStore.getMessageStoreConfig());
         this.haReader = new HAClientReader();
         haReader.registerHook(readSize -> {
@@ -131,9 +133,10 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         init();
     }
 
-    @Override public String getServiceName() {
+    @Override
+    public String getServiceName() {
         if (haService.getDefaultMessageStore().getBrokerConfig().isInBrokerContainer()) {
-            return haService.getDefaultMessageStore().getBrokerIdentity().getLoggerIdentifier() + AutoSwitchHAClient.class.getSimpleName();
+            return haService.getDefaultMessageStore().getBrokerIdentity().getIdentifier() + AutoSwitchHAClient.class.getSimpleName();
         }
         return AutoSwitchHAClient.class.getSimpleName();
     }
@@ -149,14 +152,16 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         }
     }
 
-    @Override public void updateMasterAddress(String newAddress) {
+    @Override
+    public void updateMasterAddress(String newAddress) {
         String currentAddr = this.masterAddress.get();
         if (!StringUtils.equals(newAddress, currentAddr) && masterAddress.compareAndSet(currentAddr, newAddress)) {
             LOGGER.info("update master address, OLD: " + currentAddr + " NEW: " + newAddress);
         }
     }
 
-    @Override public void updateHaMasterAddress(String newAddress) {
+    @Override
+    public void updateHaMasterAddress(String newAddress) {
         String currentAddr = this.masterHaAddress.get();
         if (!StringUtils.equals(newAddress, currentAddr) && masterHaAddress.compareAndSet(currentAddr, newAddress)) {
             LOGGER.info("update master ha address, OLD: " + currentAddr + " NEW: " + newAddress);
@@ -164,27 +169,33 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         }
     }
 
-    @Override public String getMasterAddress() {
+    @Override
+    public String getMasterAddress() {
         return this.masterAddress.get();
     }
 
-    @Override public String getHaMasterAddress() {
+    @Override
+    public String getHaMasterAddress() {
         return this.masterHaAddress.get();
     }
 
-    @Override public long getLastReadTimestamp() {
+    @Override
+    public long getLastReadTimestamp() {
         return this.lastReadTimestamp;
     }
 
-    @Override public long getLastWriteTimestamp() {
+    @Override
+    public long getLastWriteTimestamp() {
         return this.lastWriteTimestamp;
     }
 
-    @Override public HAConnectionState getCurrentState() {
+    @Override
+    public HAConnectionState getCurrentState() {
         return this.currentState;
     }
 
-    @Override public void changeCurrentState(HAConnectionState haConnectionState) {
+    @Override
+    public void changeCurrentState(HAConnectionState haConnectionState) {
         LOGGER.info("change state to {}", haConnectionState);
         this.currentState = haConnectionState;
     }
@@ -194,7 +205,8 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         this.waitForRunning(1000 * 5);
     }
 
-    @Override public void closeMaster() {
+    @Override
+    public void closeMaster() {
         if (null != this.socketChannel) {
             try {
                 SelectionKey sk = this.socketChannel.keyFor(this.selector);
@@ -219,11 +231,13 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         }
     }
 
-    @Override public long getTransferredByteInSecond() {
+    @Override
+    public long getTransferredByteInSecond() {
         return this.flowMonitor.getTransferredByteInSecond();
     }
 
-    @Override public void shutdown() {
+    @Override
+    public void shutdown() {
         changeCurrentState(HAConnectionState.SHUTDOWN);
         // Shutdown thread firstly
         this.flowMonitor.shutdown();
@@ -256,7 +270,7 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         // Address length
         this.handshakeHeaderBuffer.putInt(this.localAddress == null ? 0 : this.localAddress.length());
         // Slave address
-        this.handshakeHeaderBuffer.put(this.localAddress == null ? new byte[0] : this.localAddress.getBytes());
+        this.handshakeHeaderBuffer.put(this.localAddress == null ? new byte[0] : this.localAddress.getBytes(StandardCharsets.UTF_8));
 
         this.handshakeHeaderBuffer.flip();
         return this.haWriter.write(this.socketChannel, this.handshakeHeaderBuffer);
@@ -299,8 +313,8 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         if (null == this.socketChannel) {
             String addr = this.masterHaAddress.get();
             if (StringUtils.isNotEmpty(addr)) {
-                SocketAddress socketAddress = RemotingUtil.string2SocketAddress(addr);
-                this.socketChannel = RemotingUtil.connect(socketAddress);
+                SocketAddress socketAddress = NetworkUtil.string2SocketAddress(addr);
+                this.socketChannel = RemotingHelper.connect(socketAddress);
                 if (this.socketChannel != null) {
                     this.socketChannel.register(this.selector, SelectionKey.OP_READ);
                     LOGGER.info("AutoSwitchHAClient connect to master {}", addr);
@@ -333,7 +347,8 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
         return this.reportSlaveMaxOffset();
     }
 
-    @Override public void run() {
+    @Override
+    public void run() {
         LOGGER.info(this.getServiceName() + " service started");
 
         this.flowMonitor.start();
@@ -430,27 +445,32 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
             try {
                 while (true) {
                     int diff = byteBufferRead.position() - AutoSwitchHAClient.this.processPosition;
-                    if (diff >= AutoSwitchHAConnection.MSG_HEADER_SIZE) {
-                        int processPosition = AutoSwitchHAClient.this.processPosition;
-                        int masterState = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 36);
-                        int bodySize = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 32);
-                        long masterOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 28);
-                        int masterEpoch = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 20);
-                        long masterEpochStartOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 16);
-                        long confirmOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE - 8);
-
+                    if (diff >= AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE) {
+                        final int processPosition = AutoSwitchHAClient.this.processPosition;
+                        int masterState = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE - 20);
+                        int bodySize = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE - 16);
+                        long masterOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE - 12);
+                        int masterEpoch = byteBufferRead.getInt(processPosition + AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE - 4);
+                        long masterEpochStartOffset = 0;
+                        long confirmOffset = 0;
+                        // if master send transfer header data, set masterEpochStartOffset and confirmOffset value.
+                        if (masterState == HAConnectionState.TRANSFER.ordinal() && diff >= AutoSwitchHAConnection.TRANSFER_HEADER_SIZE) {
+                            masterEpochStartOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.TRANSFER_HEADER_SIZE - 16);
+                            confirmOffset = byteBufferRead.getLong(processPosition + AutoSwitchHAConnection.TRANSFER_HEADER_SIZE - 8);
+                        }
                         if (masterState != AutoSwitchHAClient.this.currentState.ordinal()) {
-                            AutoSwitchHAClient.this.processPosition += AutoSwitchHAConnection.MSG_HEADER_SIZE + bodySize;
+                            int headerSize = masterState == HAConnectionState.TRANSFER.ordinal() ? AutoSwitchHAConnection.TRANSFER_HEADER_SIZE : AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE;
+                            AutoSwitchHAClient.this.processPosition += headerSize + bodySize;
                             AutoSwitchHAClient.this.waitForRunning(1);
                             LOGGER.error("State not matched, masterState:{}, slaveState:{}, bodySize:{}, offset:{}, masterEpoch:{}, masterEpochStartOffset:{}, confirmOffset:{}",
                                 masterState, AutoSwitchHAClient.this.currentState, bodySize, masterOffset, masterEpoch, masterEpochStartOffset, confirmOffset);
-                            return true;
+                            return false;
                         }
 
-                        if (diff >= (AutoSwitchHAConnection.MSG_HEADER_SIZE + bodySize)) {
+                        if (diff >= AutoSwitchHAConnection.TRANSFER_HEADER_SIZE + bodySize || diff >= AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE + bodySize) {
                             switch (AutoSwitchHAClient.this.currentState) {
-                                case HANDSHAKE:
-                                    AutoSwitchHAClient.this.processPosition += AutoSwitchHAConnection.MSG_HEADER_SIZE;
+                                case HANDSHAKE: {
+                                    AutoSwitchHAClient.this.processPosition += AutoSwitchHAConnection.HANDSHAKE_HEADER_SIZE;
                                     // Truncate log
                                     int entrySize = AutoSwitchHAConnection.EPOCH_ENTRY_SIZE;
                                     final int entryNums = bodySize / entrySize;
@@ -468,14 +488,14 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
                                         LOGGER.error("AutoSwitchHAClient truncate log failed in handshake state");
                                         return false;
                                     }
-                                    break;
-                                case TRANSFER:
+                                }
+                                break;
+                                case TRANSFER: {
                                     byte[] bodyData = new byte[bodySize];
-                                    byteBufferRead.position(AutoSwitchHAClient.this.processPosition + AutoSwitchHAConnection.MSG_HEADER_SIZE);
+                                    byteBufferRead.position(AutoSwitchHAClient.this.processPosition + AutoSwitchHAConnection.TRANSFER_HEADER_SIZE);
                                     byteBufferRead.get(bodyData);
                                     byteBufferRead.position(readSocketPos);
-                                    AutoSwitchHAClient.this.processPosition += AutoSwitchHAConnection.MSG_HEADER_SIZE + bodySize;
-
+                                    AutoSwitchHAClient.this.processPosition += AutoSwitchHAConnection.TRANSFER_HEADER_SIZE + bodySize;
                                     long slavePhyOffset = AutoSwitchHAClient.this.messageStore.getMaxPhyOffset();
                                     if (slavePhyOffset != 0) {
                                         if (slavePhyOffset != masterOffset) {
@@ -502,11 +522,13 @@ public class AutoSwitchHAClient extends ServiceThread implements HAClient {
                                         return false;
                                     }
                                     break;
+                                }
                                 default:
                                     break;
                             }
                             continue;
                         }
+
                     }
 
                     if (!byteBufferRead.hasRemaining()) {

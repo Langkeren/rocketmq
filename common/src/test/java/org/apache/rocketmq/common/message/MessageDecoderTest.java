@@ -257,6 +257,7 @@ public class MessageDecoderTest {
         assertThat("abc").isEqualTo(decodedMsg.getTopic());
     }
 
+    @Test
     public void testNullValueProperty() throws Exception {
         MessageExt msg = new MessageExt();
         msg.setBody("x".getBytes());
@@ -382,7 +383,7 @@ public class MessageDecoderTest {
     }
 
     @Test
-    public void testMessageId() throws Exception{
+    public void testMessageId() throws Exception {
         // ipv4 messageId test
         MessageExt msgExt = new MessageExt();
         msgExt.setStoreHost(new InetSocketAddress("127.0.0.1", 9103));
